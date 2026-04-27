@@ -165,7 +165,30 @@ PLOTLY_THEME = dict(
     colorway=["#3b6ef5", "#60a5fa", "#34d399", "#f472b6", "#fbbf24", "#a78bfa"],
 )
 
+# ─── SECURITY CONSTANTS ─────────────────────────────────────────
+MAX_FILE_SIZE_MB = 50
+MAX_ROWS = 500_000
+FORMULA_PREFIXES = ('=', '+', '-', '@')
+
 # ─── HELPERS ────────────────────────────────────────────────────
+
+def sanitize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    [SECURITY] Escapa fórmulas CSV injection em colunas de texto.
+    Células que iniciam com =, +, -, @ são prefixadas com ' para
+    evitar execução automática em Excel/LibreOffice ao abrir o export.
+    """
+    def _clean(val):
+        if isinstance(val, str) and val.startswith(FORMULA_PREFIXES):
+            return "'" + val
+        return val
+
+    sanitized = df.copy()
+    for col in sanitized.select_dtypes(include="object").columns:
+        sanitized[col] = sanitized[col].map(_clean)
+    return sanitized
+
+
 @st.cache_data(ttl=300)
 def classify_columns(df):
     numeric, categorical, date, id_like, text_free = [], [], [], [], []
@@ -316,8 +339,9 @@ with st.sidebar:
 df = None
 
 if uploaded is not None:
-    if uploaded.size > 50 * 1024 * 1024:
-        st.error("Arquivo muito grande (limite: 50MB).")
+    # [SECURITY] Limite de tamanho em bytes
+    if uploaded.size > MAX_FILE_SIZE_MB * 1024 * 1024:
+        st.error(f"Arquivo muito grande (limite: {MAX_FILE_SIZE_MB}MB).")
         st.stop()
 
     with st.spinner("Processando dados..."):
@@ -329,6 +353,11 @@ if uploaded is not None:
         except Exception:
             st.error("Nao foi possivel ler o arquivo. Verifique se o formato e valido (CSV, XLS ou XLSX).")
             st.stop()
+
+    # [SECURITY] Limite de linhas — proteção contra arquivos gigantes / zip bombs
+    if df is not None and len(df) > MAX_ROWS:
+        st.error(f"Arquivo com mais de {MAX_ROWS:,} linhas não é suportado. Reduza o dataset e tente novamente.")
+        st.stop()
 
 if df is not None and df.empty:
     st.warning("O arquivo carregado esta vazio. Envie um arquivo com dados.")
@@ -545,7 +574,9 @@ with tab4:
     with st.expander("Estatisticas descritivas"):
         if num_cols:
             st.dataframe(df[num_cols].describe().round(2), use_container_width=True)
-    csv_export = df.to_csv(index=False).encode("utf-8")
+
+    # [SECURITY] CSV export sanitizado contra formula injection
+    csv_export = sanitize_dataframe(df).to_csv(index=False).encode("utf-8")
     st.download_button(
         "Exportar dados tratados (CSV)",
         data=csv_export,
